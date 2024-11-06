@@ -1,6 +1,7 @@
 #! /usr/bin/python3
-
+import sys
 import redis
+
 from logging import getLogger
 from fail2ban.server.action import ActionBase
 from pickle import loads, dumps
@@ -9,45 +10,17 @@ from datetime import datetime, date, timezone, timedelta
 from nanoid import generate
 from ipaddress import ip_network, ip_address
 
-class CIDRCache:
-    def __init__(self, redis):
-        self._logSys = getLogger("fail2ban.a.%s" % self.__class__.__name__)
-        self._logSys.info("initializing CIDRCache")
-        self.redis = redis
-        self.cidrs = []
-        for k in self.redis.scan_iter(match="cidr:*"):
-            self.add(k)
+# not sure how this can be improved...
+sys.path.append("/etc/fail2ban/action.d")
 
-    def add(self, key):
-        try:
-            network = ip_network(key[5:])
-            self.cidrs.append((network, key))
-        except ValueError:
-            self._logSys.warning(f"cannot convert {key} to an IPv46Network")
-
-    def check(self,ip):
-        # ip should already be an IPv46Address
-        for net, key in self.cidrs:
-            if ip in net:
-                self._logSys.info(f"found {str(ip)} in net {key}")
-                try:
-                    # this WILL raise an exception, because of the automatic
-                    # decode setting in the constructor. Instead of setting up
-                    # a second channel to KV store, catch the exception and 
-                    # use the raw data contained therein
-                    data = self.redis.get(key)
-                except UnicodeDecodeError as e:
-                    data = e.object
-                return data
-        return None
-
+from cidrcache import CIDRS
 
 class WhoisCache:
-    def __init__(self, redis, cidrs):
+    def __init__(self, redis):
         self._logSys = getLogger("fail2ban.a.%s" % self.__class__.__name__)
         self._logSys.info("initializing WhoisCache")
         self.redis = redis
-        self.cidrs = cidrs
+        self.cidrs = CIDRS
 
     def _get_ipwhois(self):
         whois = None
@@ -93,6 +66,9 @@ class WhoisCache:
             else:
                 self._logSys.warning(f"no info for {self.ip}")
                 ccode = None
+        else:
+            # for helper scripts this is showing that the CIDR range was already known
+            ccode = ccode.lower()
 
         return ccode
 
@@ -111,8 +87,7 @@ class StoreInRedis(ActionBase):
         self.today = self.now.date().isoformat()
         self.norestored = 1
         self.r = redis.Redis(host=self.khost, port=self.kport, db=0, decode_responses=True)
-        self.cidrs = CIDRCache(self.r)
-        self.cache = WhoisCache(self.r, self.cidrs)
+        self.cache = WhoisCache(self.r)
 
     def start(self):
         pass
@@ -123,10 +98,12 @@ class StoreInRedis(ActionBase):
     def ban(self, aInfo):
         ip = str(aInfo.get("ip"))
         self._logSys.info(f"banning ip {ip}")
+        self._logSys.info(f"CIDR Cache has {CIDRS.len()} entries")
         ccode = self.cache.set(ip)
         if ccode is None:
             self._logSys.warning(f"{self.jail} no info for {self.ip}")
             ccode = "XX"
+        ccode = ccode.upper()
         nid = generate("0123456789abcdefghijklmnopqrstuvwxyz", 10)
         # to count the numbers of banned IPs per Country
         self.r.sadd(f"f2b:{ccode}", nid)
@@ -134,10 +111,10 @@ class StoreInRedis(ActionBase):
         self.r.sadd(f"f2b:{self.jail.name}", nid)
         # to count the numbers of bans per day
         self.r.sadd(f"f2b:{self.today}", nid)
-        # to record details of the ban
-        self.r.hset(f"f2b:{nid}", items=["jail", self.jail.name, "ip", ip, "country", ccode, "timestamp", self.nowstamp])
         # to record all occurrences of this ip
         self.r.sadd(f"f2b:{ip}", nid)
+        # to record details of the ban
+        self.r.hset(f"f2b:{nid}", items=["jail", self.jail.name, "ip", ip, "country", ccode, "timestamp", self.nowstamp])
 
     def flush(self):
         return True
@@ -146,6 +123,10 @@ class StoreInRedis(ActionBase):
         ip = str(aInfo.get("ip"))
         self._logSys.info(f"unbanning ip {ip}")
         ccode = self.cache.set(ip)
+        if ccode is None:
+            self._logSys.warning(f"{self.jail} unban no info for {ip}")
+            ccode = "XX"
+        ccode = ccode.upper()
         for nid in self.r.smembers(f"f2b:{ip}"):
             self.r.srem(f"f2b:{ccode}", nid)
             self.r.srem(f"f2b:{self.jail.name}", nid)
