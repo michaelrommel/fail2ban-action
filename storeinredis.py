@@ -82,9 +82,6 @@ class StoreInRedis(ActionBase):
         self.jail = jail
         self.name = name
         self.matches = matches
-        self.now = datetime.now(tz=timezone(timedelta(hours=1)))
-        self.nowstamp = int(self.now.timestamp())
-        self.today = self.now.date().isoformat()
         self.norestored = 1
         self.r = redis.Redis(host=self.khost, port=self.kport, db=0, decode_responses=True)
         self.cache = WhoisCache(self.r)
@@ -96,6 +93,9 @@ class StoreInRedis(ActionBase):
         pass
 
     def ban(self, aInfo):
+        now = datetime.now(tz=timezone(timedelta(hours=1)))
+        nowstamp = int(now.timestamp())
+        today = now.date().isoformat()
         ip = str(aInfo.get("ip"))
         self._logSys.info(f"banning ip {ip}")
         self._logSys.info(f"CIDR Cache has {CIDRS.len()} entries")
@@ -110,11 +110,11 @@ class StoreInRedis(ActionBase):
         # to count the numbers of banned IPs per jail
         self.r.sadd(f"f2b:{self.jail.name}", nid)
         # to count the numbers of bans per day
-        self.r.sadd(f"f2b:{self.today}", nid)
+        self.r.sadd(f"f2b:{today}", nid)
         # to record all occurrences of this ip
         self.r.sadd(f"f2b:{ip}", nid)
         # to record details of the ban
-        self.r.hset(f"f2b:{nid}", items=["jail", self.jail.name, "ip", ip, "country", ccode, "timestamp", self.nowstamp])
+        self.r.hset(f"f2b:{nid}", items=["jail", self.jail.name, "ip", ip, "country", ccode, "timestamp", nowstamp])
 
     def flush(self):
         return True
